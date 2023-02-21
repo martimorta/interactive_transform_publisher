@@ -9,6 +9,7 @@ from interactive_transform_publisher_msgs.srv import FramesTransform
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 from math import sqrt
+from copy import deepcopy
 
 class InteractiveTransformPublisher(Node):
     def __init__(self):
@@ -16,6 +17,7 @@ class InteractiveTransformPublisher(Node):
         self.interactive_marker_server = None
         self.menu_handler = None
         self.static_tf_broadcaster = None
+        self.shadows_ = []
 
          # Parameters
         self.add_on_set_parameters_callback(self.on_parameter)
@@ -48,6 +50,7 @@ class InteractiveTransformPublisher(Node):
             title='Print Transform',
             callback=self._print_transform_callback
         )
+        self.menu_handler.setCheckState(self.menu_handler.insert( "Shadow", callback=self._enable_shadow_callback ), MenuHandler.UNCHECKED )
 
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
 
@@ -122,7 +125,7 @@ class InteractiveTransformPublisher(Node):
         self.interactive_marker_server.applyChanges()
 
     def _update_static_transform_callback(self, feedback):
-        self.static_tf_broadcaster.sendTransform([self._create_transform(
+        transforms = [self._create_transform(
             stamp=self.get_clock().now().to_msg(),
             position=Vector3(
                     x=feedback.pose.position.x,
@@ -137,7 +140,95 @@ class InteractiveTransformPublisher(Node):
                 ),
             frame_id=feedback.header.frame_id,
             child_frame_id=feedback.marker_name
-        )])
+        )]
+        if feedback.marker_name in self.shadows_:
+            shadow_pose = deepcopy(feedback.pose)
+            shadow_pose.position.z = 0.0
+            shadow_pose.orientation = Quaternion()
+            transforms.append(
+                self._create_transform(
+                    stamp=self.get_clock().now().to_msg(),
+                    position=Vector3(
+                            x=shadow_pose.position.x,
+                            y=shadow_pose.position.y,
+                            z=0.0
+                        ),
+                    orientation=Quaternion(),
+                    frame_id=feedback.header.frame_id,
+                    child_frame_id=feedback.marker_name+"-shadow"
+                )
+            )
+            # Move marker
+            self.interactive_marker_server.setPose(feedback.marker_name+"-shadow",shadow_pose)
+        self.static_tf_broadcaster.sendTransform(transforms)
+        
+
+
+    def _enable_shadow_callback(self, feedback):
+        handle = feedback.menu_entry_id
+        
+        if self.menu_handler.getCheckState( handle ) == MenuHandler.CHECKED:
+            self.menu_handler.setCheckState( handle, MenuHandler.UNCHECKED )
+            self.get_logger().info(f'Hiding shadow for {feedback.marker_name}')
+        else:
+            self.menu_handler.setCheckState( handle, MenuHandler.CHECKED )
+
+            if not feedback.marker_name in self.shadows_:
+                self.shadows_.append(feedback.marker_name)
+
+            self.get_logger().info(f'Showing shadow for {feedback.marker_name}')
+            self.interactive_marker_server.insert(
+                marker=self._create_shadow_marker(
+                    feedback.marker_name, 
+                    feedback.pose, 
+                    feedback.header.frame_id, 
+                    self.scale_
+                ),
+                feedback_callback=self._update_static_transform_callback
+            )
+            self.static_tf_broadcaster.sendTransform([self._create_transform(
+                stamp=self.get_clock().now().to_msg(),
+                position=Vector3(x=feedback.pose.position.x, y=feedback.pose.position.y, z=feedback.pose.position.z),
+                orientation=feedback.pose.orientation,
+                frame_id=self.get_parameter('frame_id').get_parameter_value().string_value,
+                child_frame_id=feedback.marker_name+"-shadow"
+            )])
+
+
+            self.menu_handler.reApply( self.interactive_marker_server )
+            self.interactive_marker_server.applyChanges()
+
+    @staticmethod
+    def _create_shadow_marker(marker_name, marker_pose, frame_id, scale):
+        marker_pose.position.z = 0.0
+        return InteractiveMarker(
+            header = Header(
+                frame_id=frame_id
+            ),
+            pose = marker_pose,
+            scale = scale,
+            name = marker_name+"-shadow",
+            controls = [
+                InteractiveMarkerControl(
+                    always_visible=True,
+                    interaction_mode=InteractiveMarkerControl.NONE,
+                    markers=[Marker(
+                        type=Marker.CYLINDER,
+                        color=ColorRGBA(
+                            r=0.0,
+                            g=0.0,
+                            b=0.0,
+                            a=0.5
+                        ),
+                        scale=Vector3(
+                            x=0.5,
+                            y=0.5,
+                            z=0.01
+                        )
+                    )]
+                )
+            ]
+        )
 
     @staticmethod
     def _create_interactive_marker(position, orientation, frame_id, child_frame_id, scale):
